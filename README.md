@@ -10,7 +10,8 @@
 | `k6/workload.js` | 워크로드(R1~R2, W1~W2, M1~M3) 1단계 부하 스크립트 |
 | `bench/find_limit.py` | 한계 탐색 드라이버 (워밍업 → 대략 탐색 → 정밀 탐색 → 확인) |
 | `docker-compose.yml` | 로컬 공통 인프라: MySQL, Prometheus, Grafana, k6 |
-| `infra/local/up.py` | App N대 + Nginx 구성 생성 및 기동 (S1 = 1대, S2 = 2/4/8대) |
+| `infra/local/up.py` | App N대 + Nginx + Read Replica M대 구성 생성 및 기동 (S1 = 1대, S2 = 2/4/8대, S3 = Replica 1/2대) |
+| `infra/local/grafana/build_dashboard.py` | Grafana 대시보드 생성 (패널은 여기서 수정) |
 | `infra/local/` | 로컬 설정 파일, Grafana 대시보드 |
 
 ## API
@@ -29,7 +30,8 @@
 ```bash
 cd app && ./gradlew test bootJar && cd ..   # 테스트 (Docker 필요) + sns.jar 빌드
 python3 infra/local/up.py --apps 2           # MySQL, App ×2, Nginx(:8080), Prometheus(:9090), Grafana(:3000)
-#   --apps N: 서버 대수, --db-connections 40: 전체 DB 커넥션 예산(App당 = 예산 / N), --pool P: App당 풀 직접 지정
+#   --apps N: 서버 대수, --db-connections 40: DB 노드당 커넥션 예산(App당 = 예산 / N), --pool P: App당 풀 직접 지정
+#   --replicas M: Read Replica (GTID 복제, 읽기는 Replica에 라운드로빈). 데이터는 Primary에만 적재
 
 # 소규모 데이터 적재 (약 4초)
 java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
@@ -39,6 +41,9 @@ java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
 # 한계 탐색 (짧은 시간으로 흐름만 확인)
 python3 bench/find_limit.py --label local-check --workload M2 --users 10000 --posts 100000 \
   --warmup-duration 30s --coarse-duration 10s --fine-duration 10s --confirm-duration 15s
+
+# S3: read-after-write 불일치 측정 (부하와 별도로 초당 20회 "작성 직후 조회" → 404 비율 = stale_reads)
+python3 bench/find_limit.py --label s3-rep2 --workload M2 --raw-rate 20 ...
 
 # 커넥션 풀 튜닝용: 대략 탐색만
 python3 bench/find_limit.py --label s1-pool10 --workload R1 --coarse-only ...
@@ -58,6 +63,11 @@ docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
 | `DB_USERNAME` / `DB_PASSWORD` | `sns` / `sns` | |
 | `DB_POOL_SIZE` | `20` | HikariCP 풀 크기 (시나리오마다 튜닝) |
 | `WORKER_ID` | `1` | 앱 인스턴스마다 다르게 (1~31) |
+| `DB_REPLICA_URLS` | (없음) | S3: 쉼표로 구분한 Replica JDBC URL. 읽기만 라운드로빈으로 보냄 |
+
+**App 실행 방식 주의**: 실행 jar를 그대로 `java -jar`로 띄우지 말고 압축을 풀어 실행한다
+(`java -Djarmode=tools -jar sns.jar extract`, `-Djdk.virtualThreadScheduler.parallelism=4`, `app/Dockerfile` 참고).
+CPU 1~2개 환경에서 가상 스레드 + Spring Boot nested jar 클래스 로더 락 때문에 앱 전체가 멈추는 교착이 재현됐다.
 
 메트릭: `/actuator/prometheus`
 

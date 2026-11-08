@@ -5,6 +5,7 @@
 // IDs of seeded posts are computed, not queried (see README "ID 형식과 적재 데이터").
 
 import http from 'k6/http';
+import { Rate } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const USERS = Number(__ENV.USERS || 1000000);
@@ -16,6 +17,10 @@ const DURATION = __ENV.DURATION || '60s';
 const DIST = __ENV.DIST || 'uniform';
 const HOT_KEYS = Number(__ENV.HOT_KEYS || 1000);
 const SUMMARY_PATH = __ENV.SUMMARY_PATH || '';
+// S3: read-after-write probe rate (0 = off). Runs alongside the main load as its own scenario.
+const RAW_RATE = Number(__ENV.RAW_RATE || 0);
+
+const staleReads = new Rate('stale_reads');
 
 // Operation weights. Mixed workloads split reads R1:R2 and writes W1:W2 evenly.
 const MIXES = {
@@ -53,12 +58,25 @@ export const options = {
       preAllocatedVUs: Math.min(Math.ceil(RATE * 0.2) + 20, 5000),
       maxVUs: Math.min(RATE * 2 + 100, 20000),
     },
+    ...(RAW_RATE > 0 && {
+      raw: {
+        executor: 'constant-arrival-rate',
+        exec: 'readAfterWrite',
+        rate: RAW_RATE,
+        timeUnit: '1s',
+        duration: DURATION,
+        preAllocatedVUs: 10,
+        maxVUs: 500,
+      },
+    }),
   },
   summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
-  // Thresholds make k6 report the per-type sub-metrics; pass/fail is decided by the driver.
+  // Thresholds make k6 report these sub-metrics; pass/fail is decided by the driver.
+  // The SLO is judged on scenario:load only, so the read-after-write probe does not skew it.
   thresholds: {
-    http_req_duration: ['p(99)<200', 'p(95)<100'],
-    http_req_failed: ['rate<0.01'],
+    'http_req_duration{scenario:load}': ['p(99)<200', 'p(95)<100'],
+    'http_req_failed{scenario:load}': ['rate<0.01'],
+    'http_reqs{scenario:load}': ['count>=0'],
     'http_req_duration{type:read}': ['p(99)<200'],
     'http_req_duration{type:write}': ['p(99)<200'],
     'http_req_failed{type:read}': ['rate<0.01'],
@@ -112,13 +130,36 @@ export default function () {
   }
 }
 
+// Create a post and read it back immediately. A 404 means the read hit a replica that has not
+// applied the write yet.
+export function readAfterWrite() {
+  const created = http.post(
+    `${BASE_URL}/posts`,
+    JSON.stringify({ userId: pick(USERS), content: 'read-after-write probe' }),
+    { ...jsonParams('probe', 'RAW-W'), responseType: 'text' },
+  );
+  if (created.status !== 201) {
+    return;
+  }
+  const read = http.get(`${BASE_URL}/posts/${created.json('id')}`, {
+    ...params('probe', 'RAW-R'),
+    responseCallback: http.expectedStatuses(200, 404),
+  });
+  staleReads.add(read.status === 404);
+}
+
 export function handleSummary(data) {
   const m = data.metrics;
   const v = (name, stat) => (m[name] ? m[name].values[stat] : undefined);
+  const stale = v('stale_reads', 'rate');
   const line =
-    `${WORKLOAD} target=${RATE}/s actual=${(v('http_reqs', 'rate') || 0).toFixed(0)}/s ` +
-    `p95=${(v('http_req_duration', 'p(95)') || 0).toFixed(1)}ms p99=${(v('http_req_duration', 'p(99)') || 0).toFixed(1)}ms ` +
-    `errors=${((v('http_req_failed', 'rate') || 0) * 100).toFixed(2)}% dropped=${v('dropped_iterations', 'count') || 0}\n`;
+    `${WORKLOAD} target=${RATE}/s actual=${(v('http_reqs{scenario:load}', 'rate') || 0).toFixed(0)}/s ` +
+    `p95=${(v('http_req_duration{scenario:load}', 'p(95)') || 0).toFixed(1)}ms ` +
+    `p99=${(v('http_req_duration{scenario:load}', 'p(99)') || 0).toFixed(1)}ms ` +
+    `errors=${((v('http_req_failed{scenario:load}', 'rate') || 0) * 100).toFixed(2)}% ` +
+    `dropped=${v('dropped_iterations', 'count') || 0}` +
+    (stale === undefined ? '' : ` stale_reads=${(stale * 100).toFixed(2)}%`) +
+    '\n';
   const out = { stdout: line };
   if (SUMMARY_PATH) {
     out[SUMMARY_PATH] = JSON.stringify(data);

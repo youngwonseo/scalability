@@ -70,7 +70,7 @@
     {
       "type": "timeseries",
       "id": 3,
-      "title": "k6 latency p99 by type",
+      "title": "k6 latency by type",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -203,9 +203,51 @@
       ]
     },
     {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Stale reads (read-after-write probe)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(k6_stale_reads_rate)",
+          "legendFormat": "404 right after create",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "App",
-      "id": 6,
+      "id": 7,
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -217,7 +259,7 @@
     },
     {
       "type": "timeseries",
-      "id": 7,
+      "id": 8,
       "title": "Server RPS by instance",
       "datasource": {
         "type": "prometheus",
@@ -248,7 +290,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(http_server_requests_seconds_count{uri!~\"/actuator.*\"}[15s]))",
+          "expr": "sum by (instance) (rate(http_server_requests_seconds_count{job=\"app\", uri!~\"/actuator.*\"}[15s]))",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -259,7 +301,7 @@
     },
     {
       "type": "timeseries",
-      "id": 8,
+      "id": 9,
       "title": "Server latency p99 by instance",
       "datasource": {
         "type": "prometheus",
@@ -290,7 +332,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(http_server_requests_seconds_bucket{uri!~\"/actuator.*\"}[30s])))",
+          "expr": "histogram_quantile(0.99, sum by (le, instance) (rate(http_server_requests_seconds_bucket{job=\"app\", uri!~\"/actuator.*\"}[30s])))",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -301,7 +343,7 @@
     },
     {
       "type": "timeseries",
-      "id": 9,
+      "id": 10,
       "title": "Process CPU",
       "datasource": {
         "type": "prometheus",
@@ -343,8 +385,8 @@
     },
     {
       "type": "timeseries",
-      "id": 10,
-      "title": "DB connection pool",
+      "id": 11,
+      "title": "DB connection pools (summed over apps)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -374,8 +416,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "hikaricp_connections_active{job=\"app\"}",
-          "legendFormat": "active {{instance}}",
+          "expr": "sum by (pool) (hikaricp_connections_active{job=\"app\"})",
+          "legendFormat": "active {{pool}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -383,17 +425,8 @@
         },
         {
           "refId": "B",
-          "expr": "hikaricp_connections_pending{job=\"app\"}",
-          "legendFormat": "pending {{instance}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        },
-        {
-          "refId": "C",
-          "expr": "hikaricp_connections_max{job=\"app\"}",
-          "legendFormat": "max {{instance}}",
+          "expr": "sum by (pool) (hikaricp_connections_pending{job=\"app\"})",
+          "legendFormat": "pending {{pool}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -403,7 +436,7 @@
     },
     {
       "type": "timeseries",
-      "id": 11,
+      "id": 12,
       "title": "Connection acquire time (max)",
       "datasource": {
         "type": "prometheus",
@@ -434,8 +467,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "hikaricp_connections_acquire_seconds_max{job=\"app\"}",
-          "legendFormat": "{{instance}}",
+          "expr": "max by (pool) (hikaricp_connections_acquire_seconds_max{job=\"app\"})",
+          "legendFormat": "{{pool}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -445,7 +478,7 @@
     },
     {
       "type": "timeseries",
-      "id": 12,
+      "id": 13,
       "title": "GC pause time/s",
       "datasource": {
         "type": "prometheus",
@@ -487,8 +520,8 @@
     },
     {
       "type": "row",
-      "title": "MySQL",
-      "id": 13,
+      "title": "MySQL (per node)",
+      "id": 14,
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -500,7 +533,7 @@
     },
     {
       "type": "timeseries",
-      "id": 14,
+      "id": 15,
       "title": "Statements/s",
       "datasource": {
         "type": "prometheus",
@@ -531,8 +564,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (command) (rate(mysql_global_status_commands_total{command=~\"select|insert|update|delete\"}[15s]))",
-          "legendFormat": "{{command}}",
+          "expr": "sum by (node, command) (rate(mysql_global_status_commands_total{command=~\"select|insert|update|delete\"}[15s]))",
+          "legendFormat": "{{node}} {{command}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -542,8 +575,8 @@
     },
     {
       "type": "timeseries",
-      "id": 15,
-      "title": "Threads",
+      "id": 16,
+      "title": "Threads running",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -574,16 +607,7 @@
         {
           "refId": "A",
           "expr": "mysql_global_status_threads_running",
-          "legendFormat": "running",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "mysql_global_status_threads_connected",
-          "legendFormat": "connected",
+          "legendFormat": "{{node}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -593,7 +617,7 @@
     },
     {
       "type": "timeseries",
-      "id": 16,
+      "id": 17,
       "title": "Row lock waits/s",
       "datasource": {
         "type": "prometheus",
@@ -625,7 +649,7 @@
         {
           "refId": "A",
           "expr": "rate(mysql_global_status_innodb_row_lock_waits[15s])",
-          "legendFormat": "waits",
+          "legendFormat": "{{node}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -635,7 +659,7 @@
     },
     {
       "type": "timeseries",
-      "id": 17,
+      "id": 18,
       "title": "Row lock time ms/s",
       "datasource": {
         "type": "prometheus",
@@ -667,7 +691,7 @@
         {
           "refId": "A",
           "expr": "rate(mysql_global_status_innodb_row_lock_time[15s])",
-          "legendFormat": "lock ms",
+          "legendFormat": "{{node}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -677,8 +701,8 @@
     },
     {
       "type": "timeseries",
-      "id": 18,
-      "title": "Buffer pool: disk reads vs logical reads",
+      "id": 19,
+      "title": "Buffer pool disk reads/s",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -709,16 +733,7 @@
         {
           "refId": "A",
           "expr": "rate(mysql_global_status_innodb_buffer_pool_reads[15s])",
-          "legendFormat": "disk reads",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        },
-        {
-          "refId": "B",
-          "expr": "rate(mysql_global_status_innodb_buffer_pool_read_requests[15s])",
-          "legendFormat": "logical reads",
+          "legendFormat": "{{node}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -728,7 +743,7 @@
     },
     {
       "type": "timeseries",
-      "id": 19,
+      "id": 20,
       "title": "Redo log fsyncs/s",
       "datasource": {
         "type": "prometheus",
@@ -760,7 +775,146 @@
         {
           "refId": "A",
           "expr": "rate(mysql_global_status_innodb_os_log_fsyncs[15s])",
-          "legendFormat": "fsyncs",
+          "legendFormat": "{{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Replication (S3)",
+      "id": 21,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Replication lag (last applied transaction)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (node) (mysql_perf_schema_last_applied_transaction_end_apply_timestamp_seconds - mysql_perf_schema_last_applied_transaction_original_commit_timestamp_seconds)",
+          "legendFormat": "{{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Seconds behind source",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mysql_slave_status_seconds_behind_source",
+          "legendFormat": "{{node}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Replication threads running",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "mysql_slave_status_replica_io_running + mysql_slave_status_replica_sql_running",
+          "legendFormat": "{{node}} (2 = ok)",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
