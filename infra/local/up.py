@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Bring up the local stack for a scenario: N app instances behind Nginx, plus optional read replicas.
 
-  S1: --apps 1     S2: --apps 2/4/8     S3: --apps 4 --replicas 1/2
+  S1: --apps 1     S2: --apps 2/4/8     S3: --apps 4 --replicas 1/2     S4: S3 + --cache
 
 Generates into infra/local/generated/ and runs docker compose:
-  compose.apps.yml     app1..appN (unique WORKER_ID each), lb, mysql-replica-1..M (+ exporters)
+  compose.apps.yml     app1..appN (unique WORKER_ID each), lb, mysql-replica-1..M, redis (+ exporters)
   nginx.conf           upstream with all N apps
   *-targets.json       Prometheus scrape targets
 
@@ -14,6 +14,7 @@ number of connections hitting MySQL stays the same as apps are added (EXPERIMENT
   python3 infra/local/up.py --apps 1
   python3 infra/local/up.py --apps 4 --db-connections 40
   python3 infra/local/up.py --apps 4 --replicas 2
+  python3 infra/local/up.py --apps 4 --replicas 2 --cache
 
 Replicas replicate from the primary with GTID auto-positioning; load data into the primary only.
 Each replica gets the same per-node connection budget as the primary.
@@ -36,6 +37,7 @@ def parse_args():
     p.add_argument("--pool", type=int, help="connection pool size per app (overrides --db-connections)")
     p.add_argument("--db-connections", type=int, default=40, help="total pool connections across all apps")
     p.add_argument("--replicas", type=int, default=0, help="read replicas (S3)")
+    p.add_argument("--cache", action="store_true", help="Redis cache-aside in front of MySQL (S4)")
     p.add_argument("--app-cpus", default="0.75")
     p.add_argument("--app-memory", default="768m")
     p.add_argument("--no-build", action="store_true", help="reuse the existing sns-app:local image")
@@ -58,11 +60,14 @@ def compose_file(args, pool):
             *(["    build: ./app"] if i == 1 else []),
             "    depends_on:",
             "      mysql: { condition: service_healthy }",
+            *(["      redis: { condition: service_healthy }"] if args.cache else []),
             "    environment:",
             "      DB_URL: jdbc:mysql://mysql:3306/sns",
             f"      DB_POOL_SIZE: {pool}",
             f"      DB_REPLICA_URLS: \"{replica_urls(args)}\"",
             f"      WORKER_ID: {i}",
+            f"      CACHE_ENABLED: \"{str(args.cache).lower()}\"",
+            "      REDIS_HOST: redis",
             "    deploy:",
             f"      resources: {{ limits: {{ cpus: \"{args.app_cpus}\", memory: {args.app_memory} }} }}",
             "    healthcheck:",
@@ -82,6 +87,26 @@ def compose_file(args, pool):
         "    deploy:",
         "      resources: { limits: { cpus: \"0.25\", memory: 128m } }",
     ]
+    if args.cache:
+        lines += [
+            "  redis:",
+            "    image: redis:7.4",
+            # cache only: no persistence; evict least recently used keys when full
+            "    command: [\"redis-server\", \"--save\", \"\", \"--appendonly\", \"no\", "
+            "\"--maxmemory\", \"512mb\", \"--maxmemory-policy\", \"allkeys-lru\"]",
+            "    deploy:",
+            "      resources: { limits: { cpus: \"1\", memory: 768m } }",
+            "    healthcheck:",
+            "      test: [\"CMD\", \"redis-cli\", \"ping\"]",
+            "      interval: 3s",
+            "      retries: 20",
+            "  redis-exporter:",
+            "    image: oliver006/redis_exporter:v1.74.0",
+            "    environment:",
+            "      REDIS_ADDR: redis://redis:6379",
+            "    depends_on:",
+            "      redis: { condition: service_healthy }",
+        ]
     for r in range(1, args.replicas + 1):
         lines += [
             f"  mysql-replica-{r}:",
@@ -157,10 +182,12 @@ def main():
     (GENERATED / "compose.apps.yml").write_text(compose_file(args, pool))
     (GENERATED / "nginx.conf").write_text(nginx_conf(args))
     (GENERATED / "mysql-targets.json").write_text(json.dumps(mysql_targets(args), indent=2))
+    (GENERATED / "redis-targets.json").write_text(
+        json.dumps([{"targets": ["redis-exporter:9121"]}] if args.cache else [], indent=2))
     (GENERATED / "app-targets.json").write_text(
         json.dumps([{"targets": [f"app{i}:8080" for i in range(1, args.apps + 1)]}], indent=2))
 
-    print(f"apps={args.apps} replicas={args.replicas} pool/app/db-node={pool} connections per db node={pool * args.apps}")
+    print(f"apps={args.apps} replicas={args.replicas} cache={args.cache} pool/app/db-node={pool} connections per db node={pool * args.apps}")
     cmd = ["docker", "compose", "-f", "docker-compose.yml", "-f", str(GENERATED / "compose.apps.yml"),
            "up", "-d", "--wait", "--remove-orphans"]
     if not args.no_build:

@@ -53,6 +53,19 @@ ROWS = [
         ("Redo log fsyncs/s", "short",
          [('rate(mysql_global_status_innodb_os_log_fsyncs[15s])', "{{node}}")]),
     ]),
+    ("Cache (S4)", [
+        ("Cache hit ratio", "percentunit",
+         [('sum by (cache) (rate(sns_cache_requests_total{result="hit"}[30s]))'
+           ' / sum by (cache) (rate(sns_cache_requests_total[30s]))', "{{cache}}")]),
+        ("Redis commands/s", "short",
+         [('rate(redis_commands_processed_total[15s])', "commands")]),
+        ("Redis CPU", "percentunit",
+         [('rate(redis_cpu_sys_seconds_total[15s]) + rate(redis_cpu_user_seconds_total[15s])', "cpu")]),
+        ("Redis memory", "bytes",
+         [('redis_memory_used_bytes', "used"), ('redis_memory_max_bytes', "max")]),
+        ("Redis evictions/s", "short",
+         [('rate(redis_evicted_keys_total[15s])', "evicted")]),
+    ]),
     ("Replication (S3)", [
         ("Replication lag (last applied transaction)", "s",
          [('max by (node) (mysql_perf_schema_last_applied_transaction_end_apply_timestamp_seconds'

@@ -269,6 +269,8 @@
   - 측정: `find_limit.py --raw-rate 20` — 본 부하와 별도 시나리오로 "작성 직후 같은 글 조회"를 초당 20회 수행, 404 비율을 `stale_reads`로 기록 (SLO 판정에서는 제외)
   - 로컬 검증에서 이미 M3(쓰기 80%) 부하 시 87%, M2에서 약 50%가 404 → 작성 직후 조회는 Primary로 보내야 함을 수치로 보여줄 수 있음
 - Replica 측정 전에는 **복제 지연 0, Primary와 row 수 일치를 확인**하고 시작 (Replica를 새로 만들면 처음부터 따라잡는 동안 404가 대량 발생함)
+- S4 캐시 정책: 단건 조회 `post:{id}` 10분(좋아요 시 삭제), 사용자 타임라인 첫 페이지 `timeline:{userId}` 60초(작성 시 삭제, 좋아요 수는 TTL 동안 늦게 반영될 수 있음), 존재하지 않는 글은 캐시하지 않음
+  - 로컬 검증: Zipf(핫키 1,000개) 적중률 약 80%, Uniform 약 2% → **캐시 효과는 키 분포가 좌우**하므로 S4는 반드시 두 분포 모두 측정
 - 복제 지연은 `performance_schema`의 트랜잭션별 (적용 완료 시각 − 원본 커밋 시각)으로 ms 단위 측정 (`Seconds_Behind_Source`는 1초 단위라 부족)
 
 ---
@@ -311,7 +313,7 @@
 | Phase 0 ✅ | 로컬 | 테스트 앱 + 저장소 계층 인터페이스 구현, 데이터 적재 스크립트 |
 | Phase 1 ✅ | 로컬 | Docker Compose 환경, 모니터링 대시보드, k6 스크립트 (탐색/확인 단계 포함) |
 | Phase 2 ✅ | 로컬 | S1~S2 흐름 검증 (App 증설, LB) |
-| Phase 3 🚧 | 로컬 | Read/Write 분리 + Replica, Redis 캐시 구현 → S3~S4 흐름 검증 |
+| Phase 3 ✅ | 로컬 | Read/Write 분리 + Replica, Redis 캐시 구현 → S3~S4 흐름 검증 |
 | Phase 4 | 로컬 | Cassandra 저장소 구현 → S5 흐름 검증, 샤드 라우팅 구현 → S6 흐름 검증 |
 | Phase 5 | 로컬 + AWS(소규모) | Terraform 작성, `run-all.sh` 작성. 최소 구성으로 apply → 워크로드 1개 → destroy 까지 **리허설 1회** (~$1) |
 | Phase 6 | AWS | **일괄 실행**: 전체 측정 후 destroy (~17h) |

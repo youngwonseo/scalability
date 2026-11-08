@@ -10,7 +10,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
+/** Storage implementation; {@code @Qualifier("storage")} lets the cache decorator (S4) wrap it. */
 @Repository
+@Qualifier("storage")
 class MySqlPostRepository implements PostRepository {
 
     private static final String COLUMNS = "id, user_id, content, like_count, created_at";
