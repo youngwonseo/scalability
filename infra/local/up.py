@@ -3,6 +3,7 @@
 
   S1: --apps 1     S2: --apps 2/4/8     S3: --apps 4 --replicas 1/2     S4: S3 + --cache
   S5: --apps 4 --storage cassandra --cassandra-nodes 3/6
+  S6: --apps 4 --storage sharded --shards 2/4
 
 Generates into infra/local/generated/ and runs docker compose:
   compose.apps.yml     app1..appN (unique WORKER_ID each), lb, mysql-replica-1..M, redis (+ exporters)
@@ -48,7 +49,8 @@ def parse_args():
     p.add_argument("--db-connections", type=int, default=40, help="total pool connections across all apps")
     p.add_argument("--replicas", type=int, default=0, help="read replicas (S3)")
     p.add_argument("--cache", action="store_true", help="Redis cache-aside in front of MySQL (S4)")
-    p.add_argument("--storage", choices=["mysql", "cassandra"], default="mysql")
+    p.add_argument("--storage", choices=["mysql", "cassandra", "sharded"], default="mysql")
+    p.add_argument("--shards", type=int, default=2, help="S6 MySQL shards (must divide 1024)")
     p.add_argument("--cassandra-nodes", type=int, default=1, help="S5 cluster size (each needs ~1.5 GB locally)")
     p.add_argument("--cassandra-rf", type=int, help="replication factor (default: min(3, nodes))")
     p.add_argument("--app-cpus", default="0.75")
@@ -58,8 +60,10 @@ def parse_args():
     args = p.parse_args()
     if not 1 <= args.apps <= MAX_WORKER_ID:
         p.error(f"--apps must be between 1 and {MAX_WORKER_ID} (one Snowflake worker id per app)")
-    if args.storage == "cassandra" and (args.replicas or args.cache):
-        p.error("--replicas/--cache apply to MySQL only")
+    if args.storage != "mysql" and (args.replicas or args.cache):
+        p.error("--replicas/--cache apply to the single-MySQL scenarios (S3/S4) only")
+    if args.storage == "sharded" and 1024 % args.shards:
+        p.error("--shards must divide 1024")
     args.cassandra_rf = args.cassandra_rf or min(3, args.cassandra_nodes)
     if args.storage == "cassandra" and args.cassandra_rf > args.cassandra_nodes:
         p.error("--cassandra-rf cannot exceed --cassandra-nodes")
@@ -82,10 +86,14 @@ def compose_file(args, pool):
             *(["      redis: { condition: service_healthy }"] if args.cache else []),
             *([f"      cassandra-{c}: {{ condition: service_healthy }}" for c in range(1, args.cassandra_nodes + 1)]
               if args.storage == "cassandra" else []),
+            *([f"      mysql-shard-{k}: {{ condition: service_healthy }}" for k in range(1, args.shards + 1)]
+              if args.storage == "sharded" else []),
             "    environment:",
             *(["      SPRING_PROFILES_ACTIVE: cassandra",
                f"      CASSANDRA_CONTACT_POINTS: \"{cassandra_contact_points(args)}\"",
                f"      CASSANDRA_RF: {args.cassandra_rf}"] if args.storage == "cassandra" else []),
+            *(["      SPRING_PROFILES_ACTIVE: sharded",
+               f"      DB_SHARD_URLS: \"{shard_urls(args)}\""] if args.storage == "sharded" else []),
             "      DB_URL: jdbc:mysql://mysql:3306/sns",
             f"      DB_POOL_SIZE: {pool}",
             f"      DB_REPLICA_URLS: \"{replica_urls(args)}\"",
@@ -158,6 +166,32 @@ def compose_file(args, pool):
                 "      start_period: 60s",
                 "      retries: 60",
             ]
+    if args.storage == "sharded":
+        for k in range(1, args.shards + 1):
+            lines += [
+                f"  mysql-shard-{k}:",
+                "    image: mysql:8.4",
+                "    environment:",
+                "      MYSQL_ROOT_PASSWORD: root",
+                "      MYSQL_DATABASE: sns",
+                "      MYSQL_USER: sns",
+                "      MYSQL_PASSWORD: sns",
+                "    volumes:",
+                "      - ./infra/local/mysql/my.cnf:/etc/mysql/conf.d/sns.cnf:ro",
+                "    deploy:",
+                "      resources: { limits: { cpus: \"1\", memory: 2g } }",
+                "    healthcheck:",
+                "      test: [\"CMD\", \"mysqladmin\", \"ping\", \"-h\", \"127.0.0.1\", \"-usns\", \"-psns\"]",
+                "      interval: 3s",
+                "      retries: 40",
+                f"  mysqld-exporter-shard-{k}:",
+                "    image: prom/mysqld-exporter:v0.17.2",
+                f"    command: [\"--mysqld.address=mysql-shard-{k}:3306\", \"--mysqld.username=root\"]",
+                "    environment:",
+                "      MYSQLD_EXPORTER_PASSWORD: root",
+                "    depends_on:",
+                f"      mysql-shard-{k}: {{ condition: service_healthy }}",
+            ]
     for r in range(1, args.replicas + 1):
         lines += [
             f"  mysql-replica-{r}:",
@@ -191,6 +225,10 @@ def replica_urls(args):
     return ",".join(f"jdbc:mysql://mysql-replica-{r}:3306/sns" for r in range(1, args.replicas + 1))
 
 
+def shard_urls(args):
+    return ",".join(f"jdbc:mysql://mysql-shard-{k}:3306/sns" for k in range(1, args.shards + 1))
+
+
 def cassandra_contact_points(args):
     return ",".join(f"cassandra-{c}:9042" for c in range(1, args.cassandra_nodes + 1))
 
@@ -200,6 +238,10 @@ def mysql_targets(args):
     for r in range(1, args.replicas + 1):
         targets.append({"targets": [f"mysqld-exporter-replica-{r}:9104"],
                         "labels": {"role": "replica", "node": f"mysql-replica-{r}"}})
+    if args.storage == "sharded":
+        for k in range(1, args.shards + 1):
+            targets.append({"targets": [f"mysqld-exporter-shard-{k}:9104"],
+                            "labels": {"role": "shard", "node": f"mysql-shard-{k}"}})
     return targets
 
 
@@ -248,6 +290,8 @@ def main():
     (GENERATED / "app-targets.json").write_text(
         json.dumps([{"targets": [f"app{i}:8080" for i in range(1, args.apps + 1)]}], indent=2))
 
+    if args.storage == "sharded":
+        print(f"storage=sharded shards={args.shards}")
     if args.storage == "cassandra":
         print(f"storage=cassandra nodes={args.cassandra_nodes} rf={args.cassandra_rf} "
               "(load data first: see README)")
@@ -267,9 +311,10 @@ def load(args, compose):
     storage = ["mysql", "mysqld-exporter", "prometheus", "grafana"]
     storage += [f"mysql-replica-{r}" for r in range(1, args.replicas + 1)]
     storage += [f"cassandra-{c}" for c in range(1, args.cassandra_nodes + 1)] if args.storage == "cassandra" else []
+    storage += [f"mysql-shard-{k}" for k in range(1, args.shards + 1)] if args.storage == "sharded" else []
     storage += ["redis"] if args.cache else []
     subprocess.run(compose + ["up", "-d", "--wait", "--remove-orphans", *storage], cwd=ROOT, check=True)
-    profiles = "loader,cassandra" if args.storage == "cassandra" else "loader"
+    profiles = {"mysql": "loader", "cassandra": "loader,cassandra", "sharded": "loader,sharded"}[args.storage]
     print(f"loading {users} users / {posts} posts into {args.storage}")
     subprocess.run(compose + ["run", "--rm", "--no-deps", "-e", f"SPRING_PROFILES_ACTIVE={profiles}", "app1",
                               f"--sns.loader.users={users}", f"--sns.loader.posts={posts}"], cwd=ROOT, check=True)
