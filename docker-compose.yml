@@ -1,0 +1,114 @@
+# Local environment for verifying the flow end to end (not for measuring).
+# Resource limits keep one component from starving the others on a laptop.
+
+x-app: &app
+  build: ./app
+  image: sns-app:local
+  depends_on:
+    mysql:
+      condition: service_healthy
+  environment: &app-env
+    DB_URL: jdbc:mysql://mysql:3306/sns
+    DB_POOL_SIZE: 20
+  deploy:
+    resources:
+      limits: { cpus: "0.75", memory: 768m }
+  healthcheck:
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
+    interval: 3s
+    retries: 40
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: sns
+      MYSQL_USER: sns
+      MYSQL_PASSWORD: sns
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./infra/local/mysql/my.cnf:/etc/mysql/conf.d/sns.cnf:ro
+      - mysql-data:/var/lib/mysql
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 2g }
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-usns", "-psns"]
+      interval: 3s
+      retries: 30
+
+  app1:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_ID: 1
+
+  app2:
+    <<: *app
+    environment:
+      <<: *app-env
+      WORKER_ID: 2
+
+  lb:
+    image: nginx:1.28
+    depends_on:
+      app1: { condition: service_healthy }
+      app2: { condition: service_healthy }
+    ports:
+      - "8080:80"
+    volumes:
+      - ./infra/local/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.17.2
+    command: ["--mysqld.address=mysql:3306", "--mysqld.username=root"]
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: root
+    depends_on:
+      mysql: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver   # k6 pushes its metrics here
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/local/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/scalability.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./infra/local/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/local/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  # Run on demand: docker compose run --rm k6 run /scripts/workload.js
+  k6:
+    image: grafana/k6:1.1.0
+    profiles: ["tools"]
+    environment:
+      BASE_URL: http://lb
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: "p(95),p(99)"
+    volumes:
+      - ./k6:/scripts:ro
+      - ./results:/results
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 1g }
+
+volumes:
+  mysql-data:

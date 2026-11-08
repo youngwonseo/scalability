@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+*.iml
+.vscode/
+results/
+*.tfstate
+*.tfstate.*
+.terraform/
+__pycache__/
+infra/local/generated/
