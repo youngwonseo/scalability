@@ -57,6 +57,8 @@ def parse_args():
     p.add_argument("--confirm-duration", default="5m")
     p.add_argument("--confirm-runs", type=int, default=2)
     p.add_argument("--pause", type=int, default=5, help="seconds between steps")
+    p.add_argument("--coarse-only", action="store_true",
+                   help="stop after the coarse phase (connection pool sweep); max_rps = last passing coarse rate")
     return p.parse_args()
 
 
@@ -156,8 +158,11 @@ class Bench:
 
         # 1. coarse
         rate, last_pass, fail_rate = a.start, None, None
+        self.coarse_steps = []
         while rate <= a.max_rate:
-            if self.run_step("coarse", rate, a.coarse_duration)["pass"]:
+            step = self.run_step("coarse", rate, a.coarse_duration)
+            self.coarse_steps.append(step)
+            if step["pass"]:
                 last_pass, rate = rate, rate * 2
             else:
                 fail_rate = rate
@@ -166,6 +171,8 @@ class Bench:
             raise SystemExit(f"No failure up to --max-rate {a.max_rate}; raise it")
         if last_pass is None:
             raise SystemExit(f"Failed already at --start {a.start}; lower it")
+        if a.coarse_only:
+            return last_pass, [s for s in self.coarse_steps if s["target_rps"] == last_pass]
 
         # 2. fine
         increment = max(1, round(fail_rate * 0.05))
@@ -197,6 +204,7 @@ class Bench:
             "label": self.args.label,
             "workload": self.args.workload,
             "dist": self.dist,
+            "mode": "coarse-only" if self.args.coarse_only else "full",
             "max_rps": knee,
             "p95_ms": worst("p95_ms"),
             "p99_ms": worst("p99_ms"),

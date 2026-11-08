@@ -4,8 +4,10 @@ global:
 scrape_configs:
   - job_name: app
     metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ["app1:8080", "app2:8080"]
+    file_sd_configs:
+      # written by infra/local/up.py for the current number of app instances
+      - files: ["/etc/prometheus/targets/app-targets.json"]
+        refresh_interval: 5s
   - job_name: mysql
     static_configs:
       - targets: ["mysqld-exporter:9104"]

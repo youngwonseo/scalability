@@ -9,7 +9,8 @@
 | `app/` | Java 25 + Spring Boot 4 SNS API, 데이터 적재기 |
 | `k6/workload.js` | 워크로드(R1~R2, W1~W2, M1~M3) 1단계 부하 스크립트 |
 | `bench/find_limit.py` | 한계 탐색 드라이버 (워밍업 → 대략 탐색 → 정밀 탐색 → 확인) |
-| `docker-compose.yml` | 로컬 검증 환경: MySQL, App ×2, Nginx, Prometheus, Grafana, k6 |
+| `docker-compose.yml` | 로컬 공통 인프라: MySQL, Prometheus, Grafana, k6 |
+| `infra/local/up.py` | App N대 + Nginx 구성 생성 및 기동 (S1 = 1대, S2 = 2/4/8대) |
 | `infra/local/` | 로컬 설정 파일, Grafana 대시보드 |
 
 ## API
@@ -27,7 +28,8 @@
 
 ```bash
 cd app && ./gradlew test bootJar && cd ..   # 테스트 (Docker 필요) + sns.jar 빌드
-docker compose up -d --build --wait          # MySQL, App ×2, Nginx(:8080), Prometheus(:9090), Grafana(:3000)
+python3 infra/local/up.py --apps 2           # MySQL, App ×2, Nginx(:8080), Prometheus(:9090), Grafana(:3000)
+#   --apps N: 서버 대수, --db-connections 40: 전체 DB 커넥션 예산(App당 = 예산 / N), --pool P: App당 풀 직접 지정
 
 # 소규모 데이터 적재 (약 4초)
 java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
@@ -37,6 +39,9 @@ java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
 # 한계 탐색 (짧은 시간으로 흐름만 확인)
 python3 bench/find_limit.py --label local-check --workload M2 --users 10000 --posts 100000 \
   --warmup-duration 30s --coarse-duration 10s --fine-duration 10s --confirm-duration 15s
+
+# 커넥션 풀 튜닝용: 대략 탐색만
+python3 bench/find_limit.py --label s1-pool10 --workload R1 --coarse-only ...
 
 # k6 단일 실행
 docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
