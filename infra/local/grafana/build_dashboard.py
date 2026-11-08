@@ -9,6 +9,15 @@ APP = 'job="app", uri!~"/actuator.*"'
 
 # (row title, [(panel title, unit, [(expr, legend)])])
 ROWS = [
+    ("Hosts (cloud: node_exporter)", [
+        ("CPU by host", "percentunit",
+         [('1 - avg by (host) (rate(node_cpu_seconds_total{mode="idle"}[30s]))', "{{host}}")]),
+        ("Network received by host", "Bps",
+         [('sum by (host) (rate(node_network_receive_bytes_total{device!~"lo|docker.*|veth.*"}[30s]))',
+           "{{host}}")]),
+        ("Disk write IOPS by host", "iops",
+         [('sum by (host) (rate(node_disk_writes_completed_total[30s]))', "{{host}}")]),
+    ]),
     ("Client (k6)", [
         ("k6 RPS by type", "reqps",
          [('sum by (type) (rate(k6_http_reqs_total[15s]))', "{{type}}")]),

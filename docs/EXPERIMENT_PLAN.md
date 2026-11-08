@@ -60,13 +60,13 @@
 - **샤드 키: `user_id`** → `GET /users/{id}/posts`(범위 조회)가 항상 한 샤드 안에서 끝남
 - **게시글 ID에 샤드 번호를 포함** (Snowflake 형식: 시간 + 샤드 번호 + 시퀀스) → `GET /posts/{id}`, `POST /posts/{id}/like`도 ID만 보고 샤드를 찾음 (조회용 매핑 테이블 불필요)
 - 샤드 라우팅: `user_id` 해시 → 샤드 번호 → 샤드별 DataSource 선택
-- 2 → 4 샤드 확장 시 데이터 재분배는 실험 범위에서 제외 (샤드 수별로 데이터를 따로 적재해 스냅샷으로 보관)
+- 2 → 4 샤드 확장 시 데이터 재분배는 실험 범위에서 제외 (샤드 수가 바뀌면 처음부터 다시 적재)
 - 물리 샤드 = 논리 샤드(`userId % 1024`) % N → N은 1024의 약수(2, 4, 8…)여야 샤드마다 같은 수의 논리 샤드를 가짐
 - 이 API의 모든 연산은 샤드 하나만 사용함(타임라인은 한 사용자, 단건·좋아요는 ID에 샤드 포함) → **크로스 샤드 쿼리가 없는 "샤딩에 유리한" 설계**. 팔로우 피드처럼 여러 사용자를 모으는 기능이 생기면 샤드 수만큼 fan-out이 필요해진다는 한계를 리포트에 함께 적는다
 - 샤드마다 DB 노드당 커넥션 예산을 동일하게 적용
 
 ### 데이터 규모
-- users 100만, posts 1,000만 row 수준으로 **한 번만 적재 → EBS 스냅샷으로 보관**, 이후에는 스냅샷 복원으로 사용
+- users 100만, posts 1,000만 row 수준. 시나리오가 바뀔 때 새로 적재 (스냅샷은 쓰지 않기로 변경, 5절 참고)
 - 기본 조건은 데이터가 InnoDB buffer pool에 다 들어가는 경우 (적재 후 데이터+인덱스 약 2GB)
 - 디스크 I/O 병목 확인은 **S1에서만** `innodb_buffer_pool_size`를 데이터보다 작게 줄여 R1/R2만 추가 측정 (데이터 재적재 불필요)
 
@@ -172,8 +172,11 @@
 |---|---|---|
 | App | c6i.large (2vCPU/4GB) | 스펙을 작게 잡아야 App 증설 효과가 잘 보임 |
 | DB (MySQL) | m6i.xlarge (4vCPU/16GB) + gp3 (IOPS/처리량 고정) | |
-| 부하 발생기 (k6) | c6i.xlarge | 테스트 중 CPU 70% 넘으면 1대 추가 |
-| 모니터링 | t3.small 또는 부하 발생기에 같이 | 측정 대상 서버에는 두지 않음 |
+| 부하 발생기 (k6) + 모니터링 | c6i.2xlarge | Prometheus·Grafana를 같이 둠. **CPU 85% 넘으면 그 단계는 무효**(자동 판정) |
+| LB (Nginx) | c6i.xlarge | App 8대까지 LB가 먼저 막히지 않도록 여유 |
+| Redis (S4) | m6i.large | |
+
+구현: `infra/aws/` (Terraform, Docker로 실행: `infra/aws/tf.sh`). 역할별 호스트 수만 변수(`app_count`, `mysql_count`, `cassandra_count`, `redis_count`)로 바꾸고, 각 호스트의 역할(Primary/Replica/Shard, App 설정 등)은 `bench/run_all.py`가 SSH로 설정한다 → 시나리오를 바꿀 때 호스트를 다시 만들 필요가 없음
 
 **시나리오별 추가 인스턴스**
 
@@ -194,21 +197,24 @@
 
 ### 클라우드 일괄 실행 절차
 
-전체 측정을 스크립트 하나(`run-all.sh`)로 자동화해 사람이 붙어 있지 않아도 끝까지 돌아가게 한다.
+전체 측정을 `bench/run_all.py` 하나로 자동화해 사람이 붙어 있지 않아도 끝까지 돌아가게 한다. 단계 정의는 `bench/scenarios.py`.
 
 ```
-1. terraform apply (S1 구성)
-2. MySQL 데이터 적재 → EBS 스냅샷 생성 (최초 1회)
-3. for 시나리오 in S1..S6:
-     terraform apply (해당 구성으로 변경)
-     for 워크로드 in 4.4 표:
-         k6 실행 → 결과(JSON) + Grafana 스냅샷 저장
-4. 결과를 로컬로 다운로드 (또는 S3 업로드)
-5. terraform destroy   ← 성공/실패와 관계없이 항상 실행 (trap)
+for 단계 in 계획 (S1 풀 탐색 → S1 → … → S6):
+    terraform apply (단계의 호스트 수)
+    역할 설정 (SSH): MySQL Primary/Replica/Shard, Cassandra 클러스터, Redis
+    저장소가 바뀌었거나 fresh 단계면 → 초기화 후 적재 (부하 발생기에서 적재기 실행)
+    Replica가 있으면 → 원본과 row 수가 같아질 때까지 대기
+    App 설정·기동 (풀 크기 = DB 예산 / App 수), LB 설정, 모니터링 대상 갱신
+    for 워크로드: 부하 발생기에서 find_limit.py를 분리 실행(nohup) → 진행 로그 수신 → result.json
+    결과를 results/cloud-<시각>/ 로 복사
+finally: 결과 복사 → terraform destroy → 남은 인스턴스 0개 확인
 ```
 
+- **EBS 스냅샷은 쓰지 않기로 변경**: 1,000만 건 적재가 몇 분이면 끝나므로 시나리오마다 다시 적재하는 편이 단순함. Replica는 원본에서 복제로 따라잡게 하고, Cassandra 6노드는 3노드에 추가하지 않고 새 클러스터로 다시 적재
+- `python3 bench/run_all.py --plan full`은 계획과 예상 비용만 출력. `--dry-run`은 실행할 명령을 모두 출력(아무것도 만들지 않음). 실제 실행은 `--yes`가 있어야 함
 - **안전장치**
-  - 스크립트 실패 시에도 `trap`으로 destroy 실행
+  - 스크립트가 실패하거나 Ctrl-C로 멈춰도 `finally`에서 결과 복사 → destroy 실행
   - 모든 인스턴스를 `instance_initiated_shutdown_behavior = "terminate"`로 만들고 부팅 시 `shutdown -h +1440` (24시간 후 자동 삭제) 설정 — 스크립트가 멈춰도 과금이 무한정 이어지지 않게
   - AWS Budgets 알림 ($40, $70)
   - 종료 후 `aws ec2 describe-instances`로 남은 인스턴스 0개인지 확인
@@ -218,17 +224,18 @@
 
 | 시나리오 | 구성 | 시간당 | 가동 시간 | 소계 |
 |---|---|---|---|---|
-| 준비 | 인프라 생성 + 데이터 적재 + 스냅샷 | ~$0.54 | 1.5h | ~$1 |
+| 준비 | 인프라 생성 + 데이터 적재 | ~$0.9 | 0.5h | ~$0.5 |
 | S1 | App 1 + DB 1 + 부하 1 | ~$0.54 | 3h | ~$2 |
 | S2 | App 최대 8 + Nginx + DB + 부하 | ~$0.9–1.3 | 2.5h | ~$3 |
 | S3 | App 4 + Primary + Replica 최대 2 + 부하 | ~$1.4 | 2.5h | ~$4 |
 | S4 | S3 + Redis | ~$1.5 | 1h | ~$2 |
 | S5 | App 4 + Cassandra 최대 6 + 부하 (+ 데이터 적재 1h) | ~$2.0 | 3h | ~$6 |
 | S6 | App 4 + MySQL 샤드 최대 4 + 부하 (+ 데이터 적재 1h) | ~$1.6 | 3h | ~$5 |
-| 기타 | EBS, 스냅샷, 공인 IP, 모니터링 | | | ~$6 |
+| 기타 | EBS, 공인 IP | | | ~$6 |
 | **합계** | | | **약 17h** | **~$30** |
 | **예산 (실패 후 재실행 1회 여유 포함)** | | | | **~$60 (약 8.5만 원)** |
 
+- `run_all.py --plan full`의 단계별 추정(부하 발생기 c6i.2xlarge, LB c6i.xlarge 반영): 약 16.5시간, 약 $24 + EBS/IP → 위 표의 $30 안쪽
 - 부하 발생기는 Spot 사용 가능 (~60–70% 절감). 회수되면 해당 워크로드만 재실행
 - **위험**: 끄는 걸 잊으면 S1 구성만으로도 월 ~$390 (약 55만 원) → 위 안전장치로 방지
 
@@ -258,7 +265,7 @@
 
 ## 7. 통제 변수 & 공정성
 
-- 시나리오 시작 시 **스냅샷에서 DB 복원** (재적재 없음), 1~2분 워밍업 후 측정
+- 시나리오 시작 시 **저장소 초기화 후 다시 적재**, 워밍업(60초) 후 측정
 - 각 워크로드는 **탐색 1회 + 확인 2회**, 중앙값 사용 (4.3 참고)
 - 시나리오마다 **커넥션 풀 크기를 튜닝**해서 최적값으로 비교 (튜닝 안 된 구성끼리 비교하면 의미 없음)
   - 주의: App N대 × 풀 크기 ≤ MySQL `max_connections`
@@ -322,7 +329,7 @@
 | Phase 2 ✅ | 로컬 | S1~S2 흐름 검증 (App 증설, LB) |
 | Phase 3 ✅ | 로컬 | Read/Write 분리 + Replica, Redis 캐시 구현 → S3~S4 흐름 검증 |
 | Phase 4 ✅ | 로컬 | Cassandra 저장소 구현 → S5 흐름 검증, 샤드 라우팅 구현 → S6 흐름 검증 |
-| Phase 5 | 로컬 + AWS(소규모) | Terraform 작성, `run-all.sh` 작성. 최소 구성으로 apply → 워크로드 1개 → destroy 까지 **리허설 1회** (~$1) |
+| Phase 5 🚧 | 로컬 + AWS(소규모) | Terraform, `bench/run_all.py` 작성 ✅ (dry-run 검증 완료). **리허설**: `run_all.py --plan rehearsal --yes` — 모든 저장소 경로를 작은 데이터로 한 번씩 (~1시간, ~$1–2) |
 | Phase 6 | AWS | **일괄 실행**: 전체 측정 후 destroy (~17h) |
 | Phase 7 | 로컬 | 결과 분석 및 리포트 작성 |
 

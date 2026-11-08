@@ -1,0 +1,36 @@
+#!/bin/bash
+# Runs once at first boot. Role-specific services are started later by bench/run_all.py over SSH.
+set -euxo pipefail
+
+# Safety net: terminate this instance after ${auto_terminate_minutes} minutes no matter what
+shutdown -h +${auto_terminate_minutes}
+
+dnf install -y docker
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+# Host metrics on every machine
+docker run -d --name node-exporter --restart unless-stopped --network host --pid host \
+  -v /:/host:ro,rslave prom/node-exporter:v1.9.1 --path.rootfs=/host
+
+# Pre-pull this role's images so scenario switches are fast
+case "${role}" in
+  app)       docker pull eclipse-temurin:25-jre ;;
+  mysql)     docker pull mysql:8.4; docker pull prom/mysqld-exporter:v0.17.2 ;;
+  cassandra) docker pull cassandra:5.0.4 ;;
+  redis)     docker pull redis:7.4; docker pull oliver006/redis_exporter:v1.74.0 ;;
+  lb)        docker pull nginx:1.28 ;;
+  loadgen)   docker pull grafana/k6:1.1.0; docker pull prom/prometheus:v3.5.0; docker pull grafana/grafana:12.1.0
+             docker pull eclipse-temurin:25-jre; dnf install -y python3 rsync ;;
+esac
+
+# Kernel limits for many connections
+cat >> /etc/sysctl.d/99-scalability.conf <<'SYSCTL'
+net.core.somaxconn = 65535
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+fs.file-max = 2097152
+SYSCTL
+sysctl --system
+
+touch /var/lib/scalability-ready

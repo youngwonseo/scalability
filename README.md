@@ -12,6 +12,8 @@
 | `docker-compose.yml` | 로컬 공통 인프라: MySQL, Prometheus, Grafana, k6 |
 | `infra/local/up.py` | App N대 + Nginx + Read Replica M대 구성 생성 및 기동 (S1 = 1대, S2 = 2/4/8대, S3 = Replica 1/2대) |
 | `infra/local/grafana/build_dashboard.py` | Grafana 대시보드 생성 (패널은 여기서 수정) |
+| `infra/aws/` | Terraform(Docker로 실행) + 호스트 역할 스크립트(`remote/`) |
+| `bench/run_all.py`, `bench/scenarios.py` | 클라우드 전체 실험 자동 실행 (생성 → 설정 → 측정 → 결과 수집 → 삭제) |
 | `infra/local/` | 로컬 설정 파일, Grafana 대시보드 |
 
 ## API
@@ -81,6 +83,21 @@ docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
 CPU 1~2개 환경에서 가상 스레드 + Spring Boot nested jar 클래스 로더 락 때문에 앱 전체가 멈추는 교착이 재현됐다.
 
 메트릭: `/actuator/prometheus`
+
+## 클라우드 실행 (AWS, 비용 발생)
+
+```bash
+python3 bench/run_all.py --plan rehearsal              # 계획·예상 비용만 출력 (아무것도 만들지 않음)
+python3 bench/run_all.py --plan rehearsal --dry-run    # 실행될 명령 전부 출력 (아무것도 만들지 않음)
+caffeinate -i python3 bench/run_all.py --plan rehearsal --yes   # 리허설 (~1시간, ~$1–2)
+caffeinate -i python3 bench/run_all.py --plan full --yes        # 전체 (~17시간, ~$30)
+#   --only s1,s2 : 일부 단계만, --keep : 끝나도 삭제하지 않음 (디버깅용, 과금 계속됨)
+```
+
+- 필요: Docker(Terraform 실행용), AWS CLI 자격 증명(`~/.aws`), 서울 리전 EC2 생성 권한, 동시 vCPU 한도 약 44 이상
+- 진행 중 Grafana: `http://<loadgen-1 공인 IP>:3000` (내 IP에서만 접근 가능)
+- 결과: `results/cloud-<시각>/` (단계별 k6 요약, `results.csv`, 실행 로그)
+- 실패해도 마지막에 항상 결과 복사 → `terraform destroy` → 남은 인스턴스 확인. 그래도 모든 인스턴스는 24시간 후 스스로 종료됨
 
 ## ID 형식과 적재 데이터 (k6 스크립트가 의존)
 

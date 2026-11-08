@@ -22,6 +22,8 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +42,12 @@ SLO_P95_MS = 100
 SLO_ERROR_RATE = 0.01
 # A step only counts if k6 actually delivered the target rate
 MIN_DELIVERED_RATIO = 0.95
+
+# Cloud: Prometheus with node_exporter targets labelled host=<name>. Each step then records per-host
+# CPU, and a step where the load generator itself is busier than this is not trusted.
+PROM_URL = os.environ.get("PROM_URL")
+LOADGEN_HOST = os.environ.get("LOADGEN_HOST", "loadgen-1")
+LOADGEN_CPU_LIMIT = 0.85
 
 
 def parse_args():
@@ -95,13 +103,20 @@ class Bench:
         cmd.append(K6_SCRIPT)
 
         print(f"[{phase}] {rate}/s for {duration} ...", flush=True)
+        started = time.time()
         proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+        elapsed = time.time() - started
         # 99 = thresholds crossed; that is expected and judged below
         if proc.returncode not in (0, 99):
             sys.stderr.write(proc.stdout + proc.stderr)
             raise SystemExit(f"k6 failed with exit code {proc.returncode}")
 
         step = self.judge(phase, rate, duration, json.loads((self.out_dir / name).read_text()))
+        step["host_cpu"] = host_cpu(elapsed)
+        loadgen_cpu = step["host_cpu"].get(LOADGEN_HOST)
+        if loadgen_cpu is not None and loadgen_cpu > LOADGEN_CPU_LIMIT:
+            step["violations"].append("loadgen-cpu")
+            step["pass"] = False
         with open(self.out_dir / "steps.jsonl", "a") as f:
             f.write(json.dumps(step) + "\n")
         verdict = "(not judged)" if phase == "warmup" else "PASS" if step["pass"] else "FAIL (" + ", ".join(step["violations"]) + ")"
@@ -110,6 +125,8 @@ class Bench:
             f"err={step['error_rate'] * 100:.2f}% read_p99={fmt(step['read_p99_ms'])} "
             f"write_p99={fmt(step['write_p99_ms'])}"
             + ("" if step["stale_read_rate"] is None else f" stale={step['stale_read_rate'] * 100:.2f}%")
+            + (" cpu[" + " ".join(f"{h}={c * 100:.0f}%" for h, c in sorted(step["host_cpu"].items())) + "]"
+               if step["host_cpu"] else "")
             + f" -> {verdict}",
             flush=True,
         )
@@ -186,7 +203,9 @@ class Bench:
         knee = None
         # keep going past fail_rate: a single coarse failure can be transient
         while rate <= a.max_rate:
-            if not self.run_step("fine", rate, a.fine_duration)["pass"]:
+            step = self.run_step("fine", rate, a.fine_duration)
+            if not step["pass"]:
+                self.stopped_by = step
                 break
             knee = rate
             rate += increment
@@ -218,6 +237,12 @@ class Bench:
             "write_p99_ms": worst("write_p99_ms"),
             "error_rate": worst("error_rate"),
             "stale_read_rate": worst("stale_read_rate"),
+            # what ended the search: SLO violations of the first failing fine step
+            "stopped_by": ",".join(getattr(self, "stopped_by", {}).get("violations", [])),
+            "limited_by": "loadgen" if "loadgen-cpu" in getattr(self, "stopped_by", {}).get("violations", [])
+            else "system",
+            # per-host CPU during the last confirm run: the bottleneck is usually the busiest host
+            "host_cpu": runs[-1].get("host_cpu", {}),
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         (self.out_dir / "result.json").write_text(json.dumps(result, indent=2))
@@ -227,10 +252,26 @@ class Bench:
             w = csv.DictWriter(f, fieldnames=list(result))
             if new:
                 w.writeheader()
-            w.writerow(result)
+            w.writerow({**result, "host_cpu": json.dumps(result["host_cpu"], sort_keys=True)})
         print(f"\n==> {self.args.label} {self.args.workload}: max sustainable {knee}/s "
               f"(p99 {fmt(result['p99_ms'])}, read p99 {fmt(result['read_p99_ms'])}, "
-              f"write p99 {fmt(result['write_p99_ms'])})")
+              f"write p99 {fmt(result['write_p99_ms'])}, limited by {result['limited_by']})")
+
+
+def host_cpu(window_seconds):
+    """Average CPU (0..1) per host over the last window, from node_exporter. Empty without PROM_URL."""
+    if not PROM_URL:
+        return {}
+    window = max(15, int(window_seconds))
+    query = f'1 - avg by (host) (rate(node_cpu_seconds_total{{mode="idle"}}[{window}s]))'
+    try:
+        with urllib.request.urlopen(f"{PROM_URL}/api/v1/query?" + urllib.parse.urlencode({"query": query}),
+                                    timeout=10) as response:
+            data = json.load(response)
+        return {r["metric"].get("host", "?"): round(float(r["value"][1]), 3) for r in data["data"]["result"]}
+    except Exception as e:  # monitoring must never break a measurement
+        print(f"        (host cpu unavailable: {e})", flush=True)
+        return {}
 
 
 def fmt(ms):
