@@ -43,7 +43,7 @@ public class DataLoader {
     private final DataSource dataSource;
     private final int threads;
     private final int batchSize;
-    private final String[] contents = generateContents();
+    private static final String[] CONTENTS = generateContents();
 
     public DataLoader(DataSource dataSource, int threads, int batchSize) {
         this.dataSource = dataSource;
@@ -81,8 +81,8 @@ public class DataLoader {
     }
 
     /** Hash n so posts of the same user (n, n + userCount, ...) do not all get the same content. */
-    private String contentFor(long n) {
-        return contents[(int) Math.floorMod((n * 0x9E3779B97F4A7C15L) >>> 32, (long) CONTENT_VARIANTS)];
+    public static String contentFor(long n) {
+        return CONTENTS[(int) Math.floorMod((n * 0x9E3779B97F4A7C15L) >>> 32, (long) CONTENT_VARIANTS)];
     }
 
     public static long ownerOf(long n, long userCount) {

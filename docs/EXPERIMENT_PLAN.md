@@ -265,6 +265,10 @@
 - **App 대수를 바꾼 직후에는 반드시 워밍업**: 로컬 검증에서 새로 뜬 JVM 4대는 첫 30초 동안 300/s도 처리하지 못했고(p99 2.5초), 워밍 후에는 같은 부하를 p99 21ms로 처리함
 - Cassandra 비교 시 **일관성 수준 명시** (예: `QUORUM` 읽기/쓰기). `ONE`으로 측정하면 MySQL과 다른 보장 수준을 비교하게 됨
 - Cassandra는 MySQL 스키마를 그대로 옮기지 말고 **쿼리 중심 모델링** (예: `posts_by_user` 테이블)
+  - 구현: `posts_by_id`(단건), `posts_by_user`(사용자 파티션, id 내림차순), `post_likes`(counter — 일반 컬럼과 같은 테이블에 둘 수 없음)
+  - 글 작성은 두 테이블에 병렬 INSERT (logged batch 아님: 빠르지만 중간 실패 시 두 테이블이 어긋날 수 있음)
+  - 좋아요는 counter라 행 잠금 경합이 없음 → W2(핫키 좋아요)에서 MySQL과 가장 큰 차이가 예상됨. 대신 404 의미를 지키려고 존재 확인 읽기 1회가 추가됨
+  - 목록 조회는 글 목록 1회 + 좋아요 수 `IN` 조회 1회
 - Read Replica 사용 시 **read-after-write 불일치** 발생 여부도 기록 (성능만큼 중요한 트레이드오프)
   - 측정: `find_limit.py --raw-rate 20` — 본 부하와 별도 시나리오로 "작성 직후 같은 글 조회"를 초당 20회 수행, 404 비율을 `stale_reads`로 기록 (SLO 판정에서는 제외)
   - 로컬 검증에서 이미 M3(쓰기 80%) 부하 시 87%, M2에서 약 50%가 404 → 작성 직후 조회는 Primary로 보내야 함을 수치로 보여줄 수 있음
@@ -314,7 +318,7 @@
 | Phase 1 ✅ | 로컬 | Docker Compose 환경, 모니터링 대시보드, k6 스크립트 (탐색/확인 단계 포함) |
 | Phase 2 ✅ | 로컬 | S1~S2 흐름 검증 (App 증설, LB) |
 | Phase 3 ✅ | 로컬 | Read/Write 분리 + Replica, Redis 캐시 구현 → S3~S4 흐름 검증 |
-| Phase 4 | 로컬 | Cassandra 저장소 구현 → S5 흐름 검증, 샤드 라우팅 구현 → S6 흐름 검증 |
+| Phase 4 🚧 | 로컬 | Cassandra 저장소 구현 → S5 흐름 검증, 샤드 라우팅 구현 → S6 흐름 검증 |
 | Phase 5 | 로컬 + AWS(소규모) | Terraform 작성, `run-all.sh` 작성. 최소 구성으로 apply → 워크로드 1개 → destroy 까지 **리허설 1회** (~$1) |
 | Phase 6 | AWS | **일괄 실행**: 전체 측정 후 destroy (~17h) |
 | Phase 7 | 로컬 | 결과 분석 및 리포트 작성 |

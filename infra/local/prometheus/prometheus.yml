@@ -16,3 +16,7 @@ scrape_configs:
     file_sd_configs:
       - files: ["/etc/prometheus/targets/redis-targets.json"]
         refresh_interval: 5s
+  - job_name: cassandra
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/cassandra-targets.json"]
+        refresh_interval: 5s
