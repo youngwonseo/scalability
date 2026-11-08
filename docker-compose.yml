@@ -16,6 +16,7 @@ services:
       - "3306:3306"
     volumes:
       - ./infra/local/mysql/my.cnf:/etc/mysql/conf.d/sns.cnf:ro
+      - ./infra/local/mysql/primary-init:/docker-entrypoint-initdb.d:ro
       - mysql-data:/var/lib/mysql
     deploy:
       resources:

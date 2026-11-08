@@ -6,6 +6,7 @@ import java.sql.Timestamp;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
@@ -14,15 +15,17 @@ class MySqlPostRepository implements PostRepository {
 
     private static final String COLUMNS = "id, user_id, content, like_count, created_at";
 
-    private final JdbcClient jdbc;
+    private final JdbcClient writer;
+    private final JdbcClient reader;
 
-    MySqlPostRepository(JdbcClient jdbc) {
-        this.jdbc = jdbc;
+    MySqlPostRepository(JdbcClient writer, @Qualifier("read") JdbcClient reader) {
+        this.writer = writer;
+        this.reader = reader;
     }
 
     @Override
     public Optional<Post> findById(long id) {
-        return jdbc.sql("SELECT " + COLUMNS + " FROM posts WHERE id = ?")
+        return reader.sql("SELECT " + COLUMNS + " FROM posts WHERE id = ?")
                 .param(id)
                 .query(MySqlPostRepository::mapRow)
                 .optional();
@@ -31,12 +34,12 @@ class MySqlPostRepository implements PostRepository {
     @Override
     public List<Post> findByUserId(long userId, Long beforeId, int limit) {
         if (beforeId == null) {
-            return jdbc.sql("SELECT " + COLUMNS + " FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT ?")
+            return reader.sql("SELECT " + COLUMNS + " FROM posts WHERE user_id = ? ORDER BY id DESC LIMIT ?")
                     .params(userId, limit)
                     .query(MySqlPostRepository::mapRow)
                     .list();
         }
-        return jdbc.sql("SELECT " + COLUMNS + " FROM posts WHERE user_id = ? AND id < ? ORDER BY id DESC LIMIT ?")
+        return reader.sql("SELECT " + COLUMNS + " FROM posts WHERE user_id = ? AND id < ? ORDER BY id DESC LIMIT ?")
                 .params(userId, beforeId, limit)
                 .query(MySqlPostRepository::mapRow)
                 .list();
@@ -44,14 +47,14 @@ class MySqlPostRepository implements PostRepository {
 
     @Override
     public void save(Post post) {
-        jdbc.sql("INSERT INTO posts (" + COLUMNS + ") VALUES (?, ?, ?, ?, ?)")
+        writer.sql("INSERT INTO posts (" + COLUMNS + ") VALUES (?, ?, ?, ?, ?)")
                 .params(post.id(), post.userId(), post.content(), post.likeCount(), Timestamp.from(post.createdAt()))
                 .update();
     }
 
     @Override
     public boolean incrementLikeCount(long id) {
-        return jdbc.sql("UPDATE posts SET like_count = like_count + 1 WHERE id = ?")
+        return writer.sql("UPDATE posts SET like_count = like_count + 1 WHERE id = ?")
                 .param(id)
                 .update() == 1;
     }

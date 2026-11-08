@@ -57,6 +57,8 @@ def parse_args():
     p.add_argument("--confirm-duration", default="5m")
     p.add_argument("--confirm-runs", type=int, default=2)
     p.add_argument("--pause", type=int, default=5, help="seconds between steps")
+    p.add_argument("--raw-rate", type=int, default=0,
+                   help="read-after-write probes per second alongside the load (S3 consistency check)")
     p.add_argument("--coarse-only", action="store_true",
                    help="stop after the coarse phase (connection pool sweep); max_rps = last passing coarse rate")
     return p.parse_args()
@@ -80,6 +82,7 @@ class Bench:
             "USERS": self.args.users,
             "POSTS": self.args.posts,
             "DIST": self.dist,
+            "RAW_RATE": self.args.raw_rate,
             "SUMMARY_PATH": f"{K6_RESULTS_DIR}/{self.args.label}/{self.args.workload}/{name}",
         }
         if "BASE_URL" in os.environ:
@@ -105,7 +108,9 @@ class Bench:
         print(
             f"        actual={step['actual_rps']:.0f}/s p95={step['p95_ms']:.1f}ms p99={step['p99_ms']:.1f}ms "
             f"err={step['error_rate'] * 100:.2f}% read_p99={fmt(step['read_p99_ms'])} "
-            f"write_p99={fmt(step['write_p99_ms'])} -> {verdict}",
+            f"write_p99={fmt(step['write_p99_ms'])}"
+            + ("" if step["stale_read_rate"] is None else f" stale={step['stale_read_rate'] * 100:.2f}%")
+            + f" -> {verdict}",
             flush=True,
         )
         time.sleep(self.args.pause)
@@ -128,15 +133,16 @@ class Bench:
             "phase": phase,
             "target_rps": rate,
             "duration": duration,
-            "actual_rps": val("http_reqs", "rate") or 0.0,
-            "p95_ms": val("http_req_duration", "p(95)") or 0.0,
-            "p99_ms": val("http_req_duration", "p(99)") or 0.0,
-            "error_rate": val("http_req_failed", "rate") or 0.0,
+            "actual_rps": val("http_reqs{scenario:load}", "rate") or 0.0,
+            "p95_ms": val("http_req_duration{scenario:load}", "p(95)") or 0.0,
+            "p99_ms": val("http_req_duration{scenario:load}", "p(99)") or 0.0,
+            "error_rate": val("http_req_failed{scenario:load}", "rate") or 0.0,
             "read_p99_ms": by_type("read", "p(99)"),
             "write_p99_ms": by_type("write", "p(99)"),
             "read_rps": val("http_reqs{type:read}", "rate") or 0.0,
             "write_rps": val("http_reqs{type:write}", "rate") or 0.0,
             "dropped": val("dropped_iterations", "count") or 0,
+            "stale_read_rate": val("stale_reads", "rate"),
         }
         violations = []
         if step["p99_ms"] >= SLO_P99_MS:
@@ -211,6 +217,7 @@ class Bench:
             "read_p99_ms": worst("read_p99_ms"),
             "write_p99_ms": worst("write_p99_ms"),
             "error_rate": worst("error_rate"),
+            "stale_read_rate": worst("stale_read_rate"),
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         (self.out_dir / "result.json").write_text(json.dumps(result, indent=2))

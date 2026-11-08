@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""Bring up the local stack with N app instances behind Nginx (S1 = 1 app, S2 = 2/4/8 apps).
+"""Bring up the local stack for a scenario: N app instances behind Nginx, plus optional read replicas.
+
+  S1: --apps 1     S2: --apps 2/4/8     S3: --apps 4 --replicas 1/2
 
 Generates into infra/local/generated/ and runs docker compose:
-  compose.apps.yml   app1..appN (unique WORKER_ID each) + lb
-  nginx.conf         upstream with all N apps
-  app-targets.json   Prometheus scrape targets
+  compose.apps.yml     app1..appN (unique WORKER_ID each), lb, mysql-replica-1..M (+ exporters)
+  nginx.conf           upstream with all N apps
+  *-targets.json       Prometheus scrape targets
 
 Connection pool: each app gets --pool connections, or by default --db-connections / N, so the total
 number of connections hitting MySQL stays the same as apps are added (EXPERIMENT_PLAN.md 7).
 
   python3 infra/local/up.py --apps 1
   python3 infra/local/up.py --apps 4 --db-connections 40
+  python3 infra/local/up.py --apps 4 --replicas 2
+
+Replicas replicate from the primary with GTID auto-positioning; load data into the primary only.
+Each replica gets the same per-node connection budget as the primary.
 """
 
 import argparse
@@ -29,6 +35,7 @@ def parse_args():
     p.add_argument("--apps", type=int, required=True, help=f"number of app instances (1..{MAX_WORKER_ID})")
     p.add_argument("--pool", type=int, help="connection pool size per app (overrides --db-connections)")
     p.add_argument("--db-connections", type=int, default=40, help="total pool connections across all apps")
+    p.add_argument("--replicas", type=int, default=0, help="read replicas (S3)")
     p.add_argument("--app-cpus", default="0.75")
     p.add_argument("--app-memory", default="768m")
     p.add_argument("--no-build", action="store_true", help="reuse the existing sns-app:local image")
@@ -54,6 +61,7 @@ def compose_file(args, pool):
             "    environment:",
             "      DB_URL: jdbc:mysql://mysql:3306/sns",
             f"      DB_POOL_SIZE: {pool}",
+            f"      DB_REPLICA_URLS: \"{replica_urls(args)}\"",
             f"      WORKER_ID: {i}",
             "    deploy:",
             f"      resources: {{ limits: {{ cpus: \"{args.app_cpus}\", memory: {args.app_memory} }} }}",
@@ -74,7 +82,45 @@ def compose_file(args, pool):
         "    deploy:",
         "      resources: { limits: { cpus: \"0.25\", memory: 128m } }",
     ]
+    for r in range(1, args.replicas + 1):
+        lines += [
+            f"  mysql-replica-{r}:",
+            "    image: mysql:8.4",
+            f"    command: [\"--server-id={100 + r}\"]",
+            "    environment:",
+            "      MYSQL_ROOT_PASSWORD: root",
+            "    depends_on:",
+            "      mysql: { condition: service_healthy }",
+            "    volumes:",
+            "      - ./infra/local/mysql/my.cnf:/etc/mysql/conf.d/sns.cnf:ro",
+            "      - ./infra/local/mysql/replica-init:/docker-entrypoint-initdb.d:ro",
+            "    deploy:",
+            "      resources: { limits: { cpus: \"1\", memory: 2g } }",
+            "    healthcheck:",
+            "      test: [\"CMD\", \"mysqladmin\", \"ping\", \"-h\", \"127.0.0.1\", \"-uroot\", \"-proot\"]",
+            "      interval: 3s",
+            "      retries: 40",
+            f"  mysqld-exporter-replica-{r}:",
+            "    image: prom/mysqld-exporter:v0.17.2",
+            f"    command: [\"--mysqld.address=mysql-replica-{r}:3306\", \"--mysqld.username=root\", \"--collect.perf_schema.replication_applier_status_by_worker\"]",
+            "    environment:",
+            "      MYSQLD_EXPORTER_PASSWORD: root",
+            "    depends_on:",
+            f"      mysql-replica-{r}: {{ condition: service_healthy }}",
+        ]
     return "\n".join(lines) + "\n"
+
+
+def replica_urls(args):
+    return ",".join(f"jdbc:mysql://mysql-replica-{r}:3306/sns" for r in range(1, args.replicas + 1))
+
+
+def mysql_targets(args):
+    targets = [{"targets": ["mysqld-exporter:9104"], "labels": {"role": "primary", "node": "mysql"}}]
+    for r in range(1, args.replicas + 1):
+        targets.append({"targets": [f"mysqld-exporter-replica-{r}:9104"],
+                        "labels": {"role": "replica", "node": f"mysql-replica-{r}"}})
+    return targets
 
 
 def nginx_conf(args):
@@ -110,10 +156,11 @@ def main():
     GENERATED.mkdir(parents=True, exist_ok=True)
     (GENERATED / "compose.apps.yml").write_text(compose_file(args, pool))
     (GENERATED / "nginx.conf").write_text(nginx_conf(args))
+    (GENERATED / "mysql-targets.json").write_text(json.dumps(mysql_targets(args), indent=2))
     (GENERATED / "app-targets.json").write_text(
         json.dumps([{"targets": [f"app{i}:8080" for i in range(1, args.apps + 1)]}], indent=2))
 
-    print(f"apps={args.apps} pool/app={pool} total connections={pool * args.apps}")
+    print(f"apps={args.apps} replicas={args.replicas} pool/app/db-node={pool} connections per db node={pool * args.apps}")
     cmd = ["docker", "compose", "-f", "docker-compose.yml", "-f", str(GENERATED / "compose.apps.yml"),
            "up", "-d", "--wait", "--remove-orphans"]
     if not args.no_build:
