@@ -8,3 +8,4 @@ results/
 .terraform/
 __pycache__/
 infra/local/generated/
+infra/local/cassandra/*.jar

@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
+import com.scalability.sns.storage.ConditionalOnMySqlStorage;
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 
@@ -28,6 +29,7 @@ import io.micrometer.core.instrument.MeterRegistry;
  * same connection budget (EXPERIMENT_PLAN.md 7).
  */
 @Configuration(proxyBeanMethods = false)
+@ConditionalOnMySqlStorage
 public class DatabaseConfig {
 
     @Bean

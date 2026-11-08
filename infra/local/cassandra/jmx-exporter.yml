@@ -1,0 +1,26 @@
+# Prometheus JMX exporter rules for Cassandra (latencies are in microseconds)
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+includeObjectNames:
+  - "org.apache.cassandra.metrics:type=ClientRequest,*"
+  - "org.apache.cassandra.metrics:type=Compaction,*"
+  - "org.apache.cassandra.metrics:type=ThreadPools,*"
+  - "org.apache.cassandra.metrics:type=Storage,*"
+rules:
+  - pattern: 'org.apache.cassandra.metrics<type=ClientRequest, scope=(Read|Write|RangeSlice), name=Latency><>(Count|Mean|95thPercentile|99thPercentile)'
+    name: cassandra_client_request_latency_$2
+    labels:
+      operation: $1
+  - pattern: 'org.apache.cassandra.metrics<type=ClientRequest, scope=(Read|Write|RangeSlice), name=(Timeouts|Unavailables|Failures)><>Count'
+    name: cassandra_client_request_$2
+    labels:
+      operation: $1
+  - pattern: 'org.apache.cassandra.metrics<type=Compaction, name=PendingTasks><>Value'
+    name: cassandra_compaction_pending_tasks
+  - pattern: 'org.apache.cassandra.metrics<type=ThreadPools, path=(\w+), scope=(\w+), name=(PendingTasks|ActiveTasks)><>Value'
+    name: cassandra_threadpool_$3
+    labels:
+      path: $1
+      pool: $2
+  - pattern: 'org.apache.cassandra.metrics<type=Storage, name=Load><>Count'
+    name: cassandra_storage_load_bytes

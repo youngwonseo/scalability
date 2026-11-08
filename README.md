@@ -33,8 +33,10 @@ python3 infra/local/up.py --apps 2           # MySQL, App ×2, Nginx(:8080), Pro
 #   --apps N: 서버 대수, --db-connections 40: DB 노드당 커넥션 예산(App당 = 예산 / N), --pool P: App당 풀 직접 지정
 #   --replicas M: Read Replica (GTID 복제, 읽기는 Replica에 라운드로빈). 데이터는 Primary에만 적재
 #   --cache: Redis cache-aside (S4). 단건 조회 10분, 사용자 타임라인 첫 페이지 60초 캐시
+#   --storage cassandra --cassandra-nodes N: S5 (RF = min(3, N), LOCAL_QUORUM). 노드당 약 1.5GB 필요
+#   --load USERS:POSTS: 저장소를 먼저 띄우고 compose 네트워크 안에서 적재 후 앱 기동 (Cassandra는 최초 1회 필수)
 
-# 소규모 데이터 적재 (약 4초)
+# 소규모 데이터 적재 (약 4초) — 또는 up.py --load 10000:100000
 java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
   --sns.loader.users=10000 --sns.loader.posts=100000
 #   기본값(users 100만, posts 1,000만, 약 2GB)은 클라우드 측정용
@@ -69,6 +71,8 @@ docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
 | `WORKER_ID` | `1` | 앱 인스턴스마다 다르게 (1~31) |
 | `DB_REPLICA_URLS` | (없음) | S3: 쉼표로 구분한 Replica JDBC URL. 읽기만 라운드로빈으로 보냄 |
 | `CACHE_ENABLED` / `REDIS_HOST` | `false` / `localhost` | S4: Redis cache-aside 사용 여부와 주소 |
+| `SPRING_PROFILES_ACTIVE=cassandra` | | S5: Cassandra 저장소 (MySQL 자동 설정 꺼짐) |
+| `CASSANDRA_CONTACT_POINTS` / `CASSANDRA_DC` / `CASSANDRA_RF` | `localhost:9042` / `datacenter1` / `3` | S5 접속 정보, keyspace 복제 계수(적재 시 적용) |
 
 **App 실행 방식 주의**: 실행 jar를 그대로 `java -jar`로 띄우지 말고 압축을 풀어 실행한다
 (`java -Djarmode=tools -jar sns.jar extract`, `-Djdk.virtualThreadScheduler.parallelism=4`, `app/Dockerfile` 참고).

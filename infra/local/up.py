@@ -2,6 +2,7 @@
 """Bring up the local stack for a scenario: N app instances behind Nginx, plus optional read replicas.
 
   S1: --apps 1     S2: --apps 2/4/8     S3: --apps 4 --replicas 1/2     S4: S3 + --cache
+  S5: --apps 4 --storage cassandra --cassandra-nodes 3/6
 
 Generates into infra/local/generated/ and runs docker compose:
   compose.apps.yml     app1..appN (unique WORKER_ID each), lb, mysql-replica-1..M, redis (+ exporters)
@@ -15,6 +16,10 @@ number of connections hitting MySQL stays the same as apps are added (EXPERIMENT
   python3 infra/local/up.py --apps 4 --db-connections 40
   python3 infra/local/up.py --apps 4 --replicas 2
   python3 infra/local/up.py --apps 4 --replicas 2 --cache
+  python3 infra/local/up.py --apps 2 --storage cassandra --cassandra-nodes 1 --load 10000:100000
+
+--load USERS:POSTS starts the storage first, runs the data loader inside the compose network, then
+starts the apps (required the first time for Cassandra: the apps need the keyspace).
 
 Replicas replicate from the primary with GTID auto-positioning; load data into the primary only.
 Each replica gets the same per-node connection budget as the primary.
@@ -23,12 +28,17 @@ Each replica gets the same per-node connection budget as the primary.
 import argparse
 import json
 import subprocess
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 GENERATED = ROOT / "infra" / "local" / "generated"
 MAX_WORKER_ID = 31
 MIN_POOL = 5
+JMX_AGENT_VERSION = "1.0.1"
+JMX_AGENT = ROOT / "infra" / "local" / "cassandra" / f"jmx_prometheus_javaagent-{JMX_AGENT_VERSION}.jar"
+JMX_AGENT_URL = ("https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/"
+                 f"{JMX_AGENT_VERSION}/jmx_prometheus_javaagent-{JMX_AGENT_VERSION}.jar")
 
 
 def parse_args():
@@ -38,12 +48,21 @@ def parse_args():
     p.add_argument("--db-connections", type=int, default=40, help="total pool connections across all apps")
     p.add_argument("--replicas", type=int, default=0, help="read replicas (S3)")
     p.add_argument("--cache", action="store_true", help="Redis cache-aside in front of MySQL (S4)")
+    p.add_argument("--storage", choices=["mysql", "cassandra"], default="mysql")
+    p.add_argument("--cassandra-nodes", type=int, default=1, help="S5 cluster size (each needs ~1.5 GB locally)")
+    p.add_argument("--cassandra-rf", type=int, help="replication factor (default: min(3, nodes))")
     p.add_argument("--app-cpus", default="0.75")
     p.add_argument("--app-memory", default="768m")
     p.add_argument("--no-build", action="store_true", help="reuse the existing sns-app:local image")
+    p.add_argument("--load", metavar="USERS:POSTS", help="(re)load the dataset before starting the apps")
     args = p.parse_args()
     if not 1 <= args.apps <= MAX_WORKER_ID:
         p.error(f"--apps must be between 1 and {MAX_WORKER_ID} (one Snowflake worker id per app)")
+    if args.storage == "cassandra" and (args.replicas or args.cache):
+        p.error("--replicas/--cache apply to MySQL only")
+    args.cassandra_rf = args.cassandra_rf or min(3, args.cassandra_nodes)
+    if args.storage == "cassandra" and args.cassandra_rf > args.cassandra_nodes:
+        p.error("--cassandra-rf cannot exceed --cassandra-nodes")
     return args
 
 
@@ -61,7 +80,12 @@ def compose_file(args, pool):
             "    depends_on:",
             "      mysql: { condition: service_healthy }",
             *(["      redis: { condition: service_healthy }"] if args.cache else []),
+            *([f"      cassandra-{c}: {{ condition: service_healthy }}" for c in range(1, args.cassandra_nodes + 1)]
+              if args.storage == "cassandra" else []),
             "    environment:",
+            *(["      SPRING_PROFILES_ACTIVE: cassandra",
+               f"      CASSANDRA_CONTACT_POINTS: \"{cassandra_contact_points(args)}\"",
+               f"      CASSANDRA_RF: {args.cassandra_rf}"] if args.storage == "cassandra" else []),
             "      DB_URL: jdbc:mysql://mysql:3306/sns",
             f"      DB_POOL_SIZE: {pool}",
             f"      DB_REPLICA_URLS: \"{replica_urls(args)}\"",
@@ -107,6 +131,33 @@ def compose_file(args, pool):
             "    depends_on:",
             "      redis: { condition: service_healthy }",
         ]
+    if args.storage == "cassandra":
+        for c in range(1, args.cassandra_nodes + 1):
+            lines += [
+                f"  cassandra-{c}:",
+                "    image: cassandra:5.0.4",
+                "    environment:",
+                "      CASSANDRA_CLUSTER_NAME: sns",
+                "      CASSANDRA_SEEDS: cassandra-1",
+                "      CASSANDRA_DC: datacenter1",
+                "      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch",
+                "      MAX_HEAP_SIZE: 768M",
+                "      HEAP_NEWSIZE: 192M",
+                "      JVM_EXTRA_OPTS: -javaagent:/opt/jmx/agent.jar=7070:/opt/jmx/config.yml",
+                *(["    ports:", "      - \"9042:9042\""] if c == 1 else []),
+                "    volumes:",
+                f"      - ./infra/local/cassandra/{JMX_AGENT.name}:/opt/jmx/agent.jar:ro",
+                "      - ./infra/local/cassandra/jmx-exporter.yml:/opt/jmx/config.yml:ro",
+                # nodes must bootstrap one at a time
+                *(["    depends_on:", f"      cassandra-{c - 1}: {{ condition: service_healthy }}"] if c > 1 else []),
+                "    deploy:",
+                "      resources: { limits: { cpus: \"1.5\", memory: 1536m } }",
+                "    healthcheck:",
+                "      test: [\"CMD-SHELL\", \"cqlsh -e 'SELECT now() FROM system.local' > /dev/null\"]",
+                "      interval: 5s",
+                "      start_period: 60s",
+                "      retries: 60",
+            ]
     for r in range(1, args.replicas + 1):
         lines += [
             f"  mysql-replica-{r}:",
@@ -138,6 +189,10 @@ def compose_file(args, pool):
 
 def replica_urls(args):
     return ",".join(f"jdbc:mysql://mysql-replica-{r}:3306/sns" for r in range(1, args.replicas + 1))
+
+
+def cassandra_contact_points(args):
+    return ",".join(f"cassandra-{c}:9042" for c in range(1, args.cassandra_nodes + 1))
 
 
 def mysql_targets(args):
@@ -184,18 +239,42 @@ def main():
     (GENERATED / "mysql-targets.json").write_text(json.dumps(mysql_targets(args), indent=2))
     (GENERATED / "redis-targets.json").write_text(
         json.dumps([{"targets": ["redis-exporter:9121"]}] if args.cache else [], indent=2))
+    (GENERATED / "cassandra-targets.json").write_text(json.dumps(
+        [{"targets": [f"cassandra-{c}:7070" for c in range(1, args.cassandra_nodes + 1)]}]
+        if args.storage == "cassandra" else [], indent=2))
+    if args.storage == "cassandra" and not JMX_AGENT.exists():
+        print(f"downloading {JMX_AGENT_URL}")
+        urllib.request.urlretrieve(JMX_AGENT_URL, JMX_AGENT)
     (GENERATED / "app-targets.json").write_text(
         json.dumps([{"targets": [f"app{i}:8080" for i in range(1, args.apps + 1)]}], indent=2))
 
+    if args.storage == "cassandra":
+        print(f"storage=cassandra nodes={args.cassandra_nodes} rf={args.cassandra_rf} "
+              "(load data first: see README)")
     print(f"apps={args.apps} replicas={args.replicas} cache={args.cache} pool/app/db-node={pool} connections per db node={pool * args.apps}")
-    cmd = ["docker", "compose", "-f", "docker-compose.yml", "-f", str(GENERATED / "compose.apps.yml"),
-           "up", "-d", "--wait", "--remove-orphans"]
+    compose = ["docker", "compose", "-f", "docker-compose.yml", "-f", str(GENERATED / "compose.apps.yml")]
     if not args.no_build:
-        cmd.append("--build")
-    subprocess.run(cmd, cwd=ROOT, check=True)
+        subprocess.run(compose + ["build", "app1"], cwd=ROOT, check=True)
+    if args.load:
+        load(args, compose)
+    subprocess.run(compose + ["up", "-d", "--wait", "--remove-orphans"], cwd=ROOT, check=True)
     # Nginx resolves upstream hosts only at startup
-    subprocess.run(["docker", "compose", "-f", "docker-compose.yml", "-f", str(GENERATED / "compose.apps.yml"),
-                    "restart", "lb"], cwd=ROOT, check=True, capture_output=True)
+    subprocess.run(compose + ["restart", "lb"], cwd=ROOT, check=True, capture_output=True)
+
+
+def load(args, compose):
+    users, posts = (int(x) for x in args.load.split(":"))
+    storage = ["mysql", "mysqld-exporter", "prometheus", "grafana"]
+    storage += [f"mysql-replica-{r}" for r in range(1, args.replicas + 1)]
+    storage += [f"cassandra-{c}" for c in range(1, args.cassandra_nodes + 1)] if args.storage == "cassandra" else []
+    storage += ["redis"] if args.cache else []
+    subprocess.run(compose + ["up", "-d", "--wait", "--remove-orphans", *storage], cwd=ROOT, check=True)
+    profiles = "loader,cassandra" if args.storage == "cassandra" else "loader"
+    print(f"loading {users} users / {posts} posts into {args.storage}")
+    subprocess.run(compose + ["run", "--rm", "--no-deps", "-e", f"SPRING_PROFILES_ACTIVE={profiles}", "app1",
+                              f"--sns.loader.users={users}", f"--sns.loader.posts={posts}"], cwd=ROOT, check=True)
+    if args.cache:
+        subprocess.run(compose + ["exec", "-T", "redis", "redis-cli", "FLUSHALL"], cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":
