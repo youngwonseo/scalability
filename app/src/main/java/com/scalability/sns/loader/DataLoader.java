@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongPredicate;
 
 import javax.sql.DataSource;
 
@@ -43,12 +44,19 @@ public class DataLoader {
     private final DataSource dataSource;
     private final int threads;
     private final int batchSize;
+    /** S6: only rows of users accepted by this filter are written (one physical shard). */
+    private final LongPredicate userFilter;
     private static final String[] CONTENTS = generateContents();
 
     public DataLoader(DataSource dataSource, int threads, int batchSize) {
+        this(dataSource, threads, batchSize, userId -> true);
+    }
+
+    public DataLoader(DataSource dataSource, int threads, int batchSize, LongPredicate userFilter) {
         this.dataSource = dataSource;
         this.threads = threads;
         this.batchSize = batchSize;
+        this.userFilter = userFilter;
     }
 
     public void load(long userCount, long postCount) {
@@ -57,13 +65,13 @@ public class DataLoader {
         log.info("Recreating schema");
         new ResourceDatabasePopulator(new ClassPathResource("db/mysql/schema.sql")).execute(dataSource);
 
-        loadTable("users", userCount, "INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)", (ps, n) -> {
+        loadTable("users", userCount, userFilter, "INSERT INTO users (id, name, created_at) VALUES (?, ?, ?)", (ps, n) -> {
             ps.setLong(1, n);
             ps.setString(2, "user" + n);
             ps.setTimestamp(3, new Timestamp(SnowflakeIdGenerator.EPOCH));
         });
 
-        loadTable("posts", postCount,
+        loadTable("posts", postCount, n -> userFilter.test(ownerOf(n, userCount)),
                 "INSERT INTO posts (id, user_id, content, like_count, created_at) VALUES (?, ?, ?, 0, ?)",
                 (ps, n) -> {
                     long userId = ownerOf(n, userCount);
@@ -89,7 +97,7 @@ public class DataLoader {
         return ((n - 1) % userCount) + 1;
     }
 
-    private void loadTable(String table, long total, String sql, RowBinder binder) {
+    private void loadTable(String table, long total, LongPredicate include, String sql, RowBinder binder) {
         log.info("Loading {} {} rows with {} threads", total, table, threads);
         long started = System.nanoTime();
         var loaded = new AtomicLong();
@@ -100,7 +108,7 @@ public class DataLoader {
                 long start = from;
                 long end = Math.min(from + CHUNK_SIZE - 1, total);
                 futures.add(executor.submit(() -> {
-                    insertRange(sql, binder, start, end);
+                    insertRange(sql, include, binder, start, end);
                     long done = loaded.addAndGet(end - start + 1);
                     if (done % 1_000_000 < CHUNK_SIZE || done == total) {
                         double seconds = (System.nanoTime() - started) / 1e9;
@@ -120,12 +128,16 @@ public class DataLoader {
         }
     }
 
-    private void insertRange(String sql, RowBinder binder, long start, long end) throws SQLException {
+    private void insertRange(String sql, LongPredicate include, RowBinder binder, long start, long end)
+            throws SQLException {
         try (Connection connection = dataSource.getConnection();
                 PreparedStatement ps = connection.prepareStatement(sql)) {
             connection.setAutoCommit(false);
             int pending = 0;
             for (long n = start; n <= end; n++) {
+                if (!include.test(n)) {
+                    continue;
+                }
                 binder.bind(ps, n);
                 ps.addBatch();
                 if (++pending == batchSize) {

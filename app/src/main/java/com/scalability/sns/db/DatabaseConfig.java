@@ -1,7 +1,5 @@
 package com.scalability.sns.db;
 
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -16,7 +14,6 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 
 import com.scalability.sns.storage.ConditionalOnMySqlStorage;
 import com.zaxxer.hikari.HikariDataSource;
-import com.zaxxer.hikari.metrics.micrometer.MicrometerMetricsTrackerFactory;
 
 import io.micrometer.core.instrument.MeterRegistry;
 
@@ -46,22 +43,9 @@ public class DatabaseConfig {
             @Value("${spring.datasource.hikari.connection-timeout}") long connectionTimeout,
             JdbcConnectionDetails primary,
             MeterRegistry meterRegistry) {
-        List<HikariDataSource> pools = new ArrayList<>();
-        List<String> replicaUrls = Arrays.stream(urls.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
-        for (int i = 0; i < replicaUrls.size(); i++) {
-            String url = replicaUrls.get(i);
-            var pool = new HikariDataSource();
-            pool.setPoolName("replica-" + (i + 1));
-            pool.setJdbcUrl(url.contains("?") ? url : url + "?" + params);
-            pool.setUsername(primary.getUsername());
-            pool.setPassword(primary.getPassword());
-            pool.setMaximumPoolSize(poolSize);
-            pool.setMinimumIdle(poolSize);
-            pool.setConnectionTimeout(connectionTimeout);
-            pool.setReadOnly(true);
-            pool.setMetricsTrackerFactory(new MicrometerMetricsTrackerFactory(meterRegistry));
-            pools.add(pool);
-        }
+        var settings = new HikariPools.Settings(params, primary.getUsername(), primary.getPassword(), poolSize,
+                connectionTimeout, meterRegistry);
+        List<HikariDataSource> pools = HikariPools.create(urls, "replica", true, settings);
         return new ReplicaPools(pools);
     }
 
@@ -78,7 +62,7 @@ public class DatabaseConfig {
 
         @Override
         public void close() {
-            pools.forEach(HikariDataSource::close);
+            HikariPools.closeAll(pools);
         }
     }
 }

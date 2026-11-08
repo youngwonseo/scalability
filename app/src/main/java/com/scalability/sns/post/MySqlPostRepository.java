@@ -16,14 +16,14 @@ import com.scalability.sns.storage.ConditionalOnMySqlStorage;
 @Repository
 @Qualifier("storage")
 @ConditionalOnMySqlStorage
-class MySqlPostRepository implements PostRepository {
+public class MySqlPostRepository implements PostRepository {
 
     private static final String COLUMNS = "id, user_id, content, like_count, created_at";
 
     private final JdbcClient writer;
     private final JdbcClient reader;
 
-    MySqlPostRepository(JdbcClient writer, @Qualifier("read") JdbcClient reader) {
+    public MySqlPostRepository(JdbcClient writer, @Qualifier("read") JdbcClient reader) {
         this.writer = writer;
         this.reader = reader;
     }

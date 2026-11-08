@@ -34,6 +34,7 @@ python3 infra/local/up.py --apps 2           # MySQL, App ×2, Nginx(:8080), Pro
 #   --replicas M: Read Replica (GTID 복제, 읽기는 Replica에 라운드로빈). 데이터는 Primary에만 적재
 #   --cache: Redis cache-aside (S4). 단건 조회 10분, 사용자 타임라인 첫 페이지 60초 캐시
 #   --storage cassandra --cassandra-nodes N: S5 (RF = min(3, N), LOCAL_QUORUM). 노드당 약 1.5GB 필요
+#   --storage sharded --shards N: S6 MySQL 샤딩 (샤드 = (userId % 1024) % N, N은 1024의 약수)
 #   --load USERS:POSTS: 저장소를 먼저 띄우고 compose 네트워크 안에서 적재 후 앱 기동 (Cassandra는 최초 1회 필수)
 
 # 소규모 데이터 적재 (약 4초) — 또는 up.py --load 10000:100000
@@ -72,6 +73,7 @@ docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
 | `DB_REPLICA_URLS` | (없음) | S3: 쉼표로 구분한 Replica JDBC URL. 읽기만 라운드로빈으로 보냄 |
 | `CACHE_ENABLED` / `REDIS_HOST` | `false` / `localhost` | S4: Redis cache-aside 사용 여부와 주소 |
 | `SPRING_PROFILES_ACTIVE=cassandra` | | S5: Cassandra 저장소 (MySQL 자동 설정 꺼짐) |
+| `SPRING_PROFILES_ACTIVE=sharded` + `DB_SHARD_URLS` | | S6: 쉼표로 구분한 샤드 JDBC URL (순서 = 샤드 번호) |
 | `CASSANDRA_CONTACT_POINTS` / `CASSANDRA_DC` / `CASSANDRA_RF` | `localhost:9042` / `datacenter1` / `3` | S5 접속 정보, keyspace 복제 계수(적재 시 적용) |
 
 **App 실행 방식 주의**: 실행 jar를 그대로 `java -jar`로 띄우지 말고 압축을 풀어 실행한다
