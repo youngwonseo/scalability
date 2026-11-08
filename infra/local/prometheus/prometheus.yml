@@ -12,3 +12,7 @@ scrape_configs:
     file_sd_configs:
       - files: ["/etc/prometheus/targets/mysql-targets.json"]
         refresh_interval: 5s
+  - job_name: redis
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/redis-targets.json"]
+        refresh_interval: 5s

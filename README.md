@@ -32,6 +32,7 @@ cd app && ./gradlew test bootJar && cd ..   # 테스트 (Docker 필요) + sns.ja
 python3 infra/local/up.py --apps 2           # MySQL, App ×2, Nginx(:8080), Prometheus(:9090), Grafana(:3000)
 #   --apps N: 서버 대수, --db-connections 40: DB 노드당 커넥션 예산(App당 = 예산 / N), --pool P: App당 풀 직접 지정
 #   --replicas M: Read Replica (GTID 복제, 읽기는 Replica에 라운드로빈). 데이터는 Primary에만 적재
+#   --cache: Redis cache-aside (S4). 단건 조회 10분, 사용자 타임라인 첫 페이지 60초 캐시
 
 # 소규모 데이터 적재 (약 4초)
 java -jar app/build/libs/sns.jar --spring.profiles.active=loader \
@@ -44,6 +45,9 @@ python3 bench/find_limit.py --label local-check --workload M2 --users 10000 --po
 
 # S3: read-after-write 불일치 측정 (부하와 별도로 초당 20회 "작성 직후 조회" → 404 비율 = stale_reads)
 python3 bench/find_limit.py --label s3-rep2 --workload M2 --raw-rate 20 ...
+
+# S4: 캐시 효과는 키 분포에 크게 좌우됨 → Uniform과 Zipf(핫키) 둘 다 측정
+python3 bench/find_limit.py --label s4 --workload R1 --dist zipf ...
 
 # 커넥션 풀 튜닝용: 대략 탐색만
 python3 bench/find_limit.py --label s1-pool10 --workload R1 --coarse-only ...
@@ -64,6 +68,7 @@ docker compose run --rm k6 run -e WORKLOAD=R1 -e RATE=100 -e DURATION=10s \
 | `DB_POOL_SIZE` | `20` | HikariCP 풀 크기 (시나리오마다 튜닝) |
 | `WORKER_ID` | `1` | 앱 인스턴스마다 다르게 (1~31) |
 | `DB_REPLICA_URLS` | (없음) | S3: 쉼표로 구분한 Replica JDBC URL. 읽기만 라운드로빈으로 보냄 |
+| `CACHE_ENABLED` / `REDIS_HOST` | `false` / `localhost` | S4: Redis cache-aside 사용 여부와 주소 |
 
 **App 실행 방식 주의**: 실행 jar를 그대로 `java -jar`로 띄우지 말고 압축을 풀어 실행한다
 (`java -Djarmode=tools -jar sns.jar extract`, `-Djdk.virtualThreadScheduler.parallelism=4`, `app/Dockerfile` 참고).
